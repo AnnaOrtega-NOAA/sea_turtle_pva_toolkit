@@ -40,16 +40,18 @@ The application is structured sequentially into five core chapters, tracking a r
 
 ### 1. Data Ingestion Workspace
 * **Functionality:** Ingests raw nesting data via built-in simulation demo channels or user-supplied spreadsheet `.csv` uploads. Supports both **Long Form** and **Wide Form** data structures.
-* **Ergonomics:** Profiles immediate data health, rendering real-time "Data Completeness" value cards and generating explicit beach-by-beach data gap reporting grids.
+* **Automated QA/QC Scanning:** Instantly evaluates data health upon upload, flagging illegal negative counts, identifying outliers, and mapping missing observation gaps (`NA`s) before modeling.
+* **Phenology Diagnostics & Overrides:** Visualizes monthly nesting waveforms (shifted to an April–March biological calendar) to detect unimodal (12-month) vs. bimodal (6-month) nesting peaks. Includes an automated heuristic recommendation engine to suggest cycle periodicities, paired with manual user override controls.
 
 ### 2. Abundance and Trend Assessment
-* **Fourier Monthly Imputation:** If data includes a monthly sub-component with standard data gaps, an automated monthly JAGS Fourier loop fills missing matrices while accommodating distinct reproductive periodicities (e.g., 6-month seasonal peak waves vs. 12-month cycles).
+* **Fourier Monthly Imputation:** If data includes a monthly sub-component with standard data gaps, an automated monthly JAGS Fourier loop fills missing matrices while accommodating the distinct reproductive periodicities assigned in Chapter 1.
 * **JAGS State-Space Trend Engine:** Fits a joint log-linear trend across beaches. It separates true biological process variance (Q) from observation counting errors (R) and supports structural break testing (e.g., assessing if a shift in monitoring protocols in a specific year altered calculated growth coefficients).
+* **Missing Data Visibility:** Explicitly maps completely unmonitored years as open circles on the final trajectory line so stakeholders can see exactly where the model relies on statistical imputation.
 
 ### 3. Beach Diagnostics Lab
 * **Dual-Framework Validation:** Superimposes your unified Bayesian JAGS results against independent maximum likelihood frameworks (MARSS Shared vs. Independent Beach trend models).
 * **Variance Scaler Isolator:** Explicitly visualizes the exact ratio of environmental noise vs observation error, giving managers objective visibility into whether counts are clouding underlying signals.
-* **Joint Parameter Covariance Matrix:** Generates an interactive Pairs Plot showing the model's posterior distributions, Pearson Correlation logs, and joint 50%/95% confidence data ellipses to confirm complete parameter identifiability.
+* **Joint Parameter Covariance Matrix:** Generates an interactive Pairs Plot showing the model's posterior distributions, Pearson Correlation logs, and joint 50%/95% confidence data ellipses to confirm complete parameter separation. Includes an automated, non-technical translation guide to help stakeholders understand variance-driven abundance ceilings and asymmetrical uncertainty buffers.
 
 ### 4. Retrospective Removal Ledger (ANEs)
 * **Adult Nester Equivalents (ANE):** Converts raw historic counts of turtle interactions (e.g., longline bycatch) into reproductive adult nester equivalents (ANEs).
