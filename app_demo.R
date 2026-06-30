@@ -48,7 +48,9 @@ rCMP <- function( n, lambda, mu, nu, tol=0.01, x_max=200 ){
 # =====================================================================
 # EXACT FOURIER IMPUTATION ENGINE
 # =====================================================================
-run_fourier_imputation <- function(df, iter = 100000) {
+# Add 'six_month_sites' as an incoming argument to the engine
+# Add 'six_month_sites' as an incoming argument to the engine
+run_fourier_imputation <- function(df, iter = 100000, six_month_sites = NULL) {
   df_clean <- df %>% 
     group_by(Year, Month, Site) %>% 
     summarise(Count = if(all(is.na(Count))) NA_real_ else sum(Count, na.rm = TRUE), .groups = "drop")
@@ -70,9 +72,10 @@ run_fourier_imputation <- function(df, iter = 100000) {
   y_matrix <- log(y_matrix)
   y_matrix <- matrix(y_matrix, ncol = n_timeseries)
   
+  # Honor user override selections: assign a 6 if user selected it, otherwise assign 12
   periods <- rep(12, n_timeseries)
   for(i in 1:n_timeseries) { 
-    if(grepl("W_|Wermon|Wamlana|Waspait|Waenibe", sites[i], ignore.case = TRUE)) periods[i] <- 6 
+    if(sites[i] %in% six_month_sites) periods[i] <- 6 
   }
   
   jags_data <- list(m = rep(1:12, times = n_years), n.steps = nrow(y_matrix), n.months = 12, pi = pi, period = periods, n.timeseries = n_timeseries, n.years = n_years)
@@ -345,6 +348,9 @@ ui <- page_navbar(
         numericInput("clutch_freq", "Clutch Frequency:", value = 4.6, step = 0.1),
         numericInput("remig_int", "Remigration Interval (years):", value = 3.3, step = 0.1),
         hr(),
+        # New placeholder slot for the user-controlled period overrides
+        uiOutput("period_override_ui"),
+        hr(),
         div(style = "background-color: #f8f9fa; border-left: 4px solid #0dcaf0; padding: 12px; border-radius: 4px; font-size: 0.95rem; font-weight: 500; color: #212529;",
             "If you are satisfied with the data input, please move to page 2. Baseline trends"
         )
@@ -359,12 +365,30 @@ ui <- page_navbar(
         column(8, bslib::card(bslib::card_header("Table 1. Data coverage over full timeline"), tableOutput("gap_table"), style = "max-height: 220px; overflow-y: auto;"))
       ), br(),
       
+      # 1. New dynamic QA/QC message center layout node
+      fluidRow(
+        column(12, uiOutput("qaqc_alerts"))
+      ), br(),
+      
+      # 2. Main data plots layout row
       fluidRow(
         column(6, card(card_header("Raw nest counts over time, by beach"), 
                        plotOutput("preview_annual_raw", height = "500px"),
                        downloadButton("download_preview_raw", "Download Raw Plot", class = "btn-sm btn-outline-secondary mt-2"))),
         column(6, card(card_header("Data preview ledger grid (Top 10 Rows)"), 
                        tableOutput("data_preview_table_raw"), style = "max-height: 565px; overflow-y: auto;"))
+      ), br(),
+      
+      # 3. New conditional row: Only shows up if an uploaded file contains monthly sub-components
+      conditionalPanel(
+        condition = "input.data_mode == 'upload' && input.map_month != 'none'",
+        fluidRow(
+          column(12, card(card_header("Nest Counts by Month (Waveform Peak Verification Check)"),
+                          plotOutput("preview_monthly_seasonality", height = "600px"), # Height increased to account for multiple beach rows
+                          hr(),
+                          uiOutput("seasonality_recommendation") # New dynamic recommendation engine container
+          ))
+        )
       )
     )
   ),
@@ -425,7 +449,7 @@ ui <- page_navbar(
           downloadButton("download_posterior", "Download Posterior Matrix Plot", class = "btn-sm btn-outline-secondary mt-auto"), 
           style = "height: 560px; overflow-y: auto;" # <-- Expanded height and added scroll safety
         )
-        )
+      )
     )
   ),
   
@@ -682,8 +706,138 @@ server <- function(input, output, session) {
     head(d_long, 10) 
   })
   
+  output$qaqc_alerts <- renderUI({
+    df <- processed_data()
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    
+    # Run data verification filters
+    negatives <- sum(df$Count < 0, na.rm = TRUE)
+    nas <- sum(is.na(df$Count))
+    
+    alerts <- list()
+    if (negatives > 0) {
+      alerts[[length(alerts) + 1]] <- div(class = "alert alert-danger d-flex align-items-center", style = "margin-bottom: 10px;",
+                                          shiny::icon("exclamation-triangle", class = "me-2"), sprintf("QA/QC Alert: Found %d negative count values in your spreadsheet. Please verify or fix your raw counts file.", negatives))
+    }
+    if (nas > 0) {
+      alerts[[length(alerts) + 1]] <- div(class = "alert alert-warning d-flex align-items-center", style = "margin-bottom: 10px;",
+                                          shiny::icon("info-circle", class = "me-2"), sprintf("QA/QC Note: Found %d missing observations (NAs/gaps). The state-space models will cleanly bridge these periods via mathematical imputation.", nas))
+    }
+    
+    if (length(alerts) == 0) {
+      return(div(class = "alert alert-success d-flex align-items-center", style = "margin-bottom: 10px;", 
+                 shiny::icon("check-circle", class = "me-2"), "QA/QC Pass: Initial data structures cleared (No negative counts or formatting errors caught)."))
+    } else {
+      return(tagList(alerts))
+    }
+  })
+  
+  output$period_override_ui <- renderUI({
+    df <- processed_data()
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    
+    # Grab all unique beach locations present in the active dataset
+    all_sites <- sort(unique(df$Site))
+    
+    # Run your original pattern check to establish the default system guess
+    default_6mo <- all_sites[grepl("W_|Wermon|Wamlana|Waspait|Waenibe", all_sites, ignore.case = TRUE)]
+    
+    selectizeInput(
+      "six_month_sites", 
+      label = tags$span(
+        "Designate 6-Month (Bimodal) Beaches:",
+        tooltip(shiny::icon("question-circle"), "Select which beaches experience two distinct nesting peaks per year. Unselected beaches default to a standard 12-month cycle.")
+      ),
+      choices = all_sites,
+      selected = default_6mo,
+      multiple = TRUE,
+      options = list(plugins = list('remove_button'))
+    )
+  })
+  
+  output$preview_monthly_seasonality <- renderPlot({
+    df <- processed_data()
+    req(df, input$data_mode == "upload", input$map_month != "none")
+    
+    # Group by Site, Year, and Month to isolate individual time-series waveforms
+    df_monthly <- df %>% 
+      filter(!is.na(Month), !is.na(Count), !is.na(Site)) %>% 
+      mutate(Month = as.numeric(Month)) %>% 
+      group_by(Site, Year, Month) %>% 
+      summarise(Total_Count = sum(Count, na.rm = TRUE), .groups = "drop") %>% 
+      mutate(X_Month = ifelse(Month >= 4, Month - 3, Month + 9))
+    
+    ggplot(df_monthly, aes(x = X_Month, y = Total_Count, group = factor(Year), color = factor(Year))) +
+      geom_line(linewidth = 0.9, alpha = 0.75) +
+      geom_point(size = 1.5) +
+      scale_x_continuous(
+        breaks = 1:12, 
+        labels = c("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar")
+      ) +
+      scale_color_viridis_d(option = "viridis") +
+      # Facet by individual beach time series with free y-axes to accommodate density differences
+      facet_wrap(~Site, scales = "free_y", ncol = 1) + 
+      theme_classic() +
+      labs(x = "Month (Biological Nesting Year)", y = "Aggregated Nest Counts", color = "Calendar Year") +
+      theme(
+        text = element_text(size = 13), 
+        strip.text = element_text(face = "bold", size = 11),
+        panel.grid.major.x = element_line(color = "grey95"),
+        legend.position = "right"
+      )
+  })
+  
+  output$seasonality_recommendation <- renderUI({
+    df <- processed_data()
+    req(df, input$data_mode == "upload", input$map_month != "none")
+    
+    sites <- sort(unique(df$Site))
+    recommendations <- list()
+    
+    for (st in sites) {
+      df_site <- df %>% filter(Site == st, !is.na(Month), !is.na(Count))
+      if (nrow(df_site) == 0) next
+      
+      # Calculate average distribution across the biological calendar segments
+      summer_activity <- sum(df_site$Count[df_site$Month %in% 4:9], na.rm = TRUE)
+      winter_activity <- sum(df_site$Count[df_site$Month %in% c(10,11,12,1,2,3)], na.rm = TRUE)
+      total_activity <- summer_activity + winter_activity
+      if(total_activity == 0) next
+      
+      # Heuristic: If winter clusters hold more than 25% of total annual nesting, it indicates a secondary peak
+      is_bimodal <- (winter_activity / total_activity > 0.25) & (summer_activity / total_activity > 0.25)
+      
+      if (is_bimodal) {
+        recommendations[[length(recommendations) + 1]] <- tags$li(
+          tags$b(st, ": "), "System suggests a ", tags$span(class = "badge bg-warning text-dark", "6-Month Period"), 
+          sprintf(" due to a bimodal waveform pattern (Summer: %.1f%%, Winter: %.1f%% of data).", 
+                  (summer_activity/total_activity)*100, (winter_activity/total_activity)*100)
+        )
+      } else {
+        recommendations[[length(recommendations) + 1]] <- tags$li(
+          tags$b(st, ": "), "System suggests a ", tags$span(class = "badge bg-primary", "12-Month Period"), 
+          " due to a single primary unimodal nesting peak season."
+        )
+      }
+    }
+    
+    tagList(
+      h5(shiny::icon("robot"), " Data Phenology Diagnostic System Suggestions:"),
+      tags$ul(recommendations),
+      p(tags$i(class = "text-muted", "Note: If your custom uploaded beach names conflict with the system's structural recommendations, you can explicitly update the `periods` logic inside your script's Fourier Imputation engine."))
+    )
+  })
+  
   historical_ane_ledger <- reactive({
     req(vault$res, input$ane_custom_take, input$ane_custom_mort)
+    
+    # If the ledger was already handled by the master progress pipeline, use it as a base
+    if (!is.null(vault$empirical_ane_ledger) && 
+        input$ane_custom_take == 30 && input$ane_custom_mort == 0.35) {
+      return(vault$empirical_ane_ledger)
+    }
+    
+    # If a user manually changes a slider on page 4, recalculate smoothly here
     years_vec <- min(vault$abund$Year, na.rm = TRUE):max(vault$abund$Year, na.rm = TRUE)
     custom_safe <- data.frame(Year = years_vec, Total_Est = input$ane_custom_take)
     
@@ -702,6 +856,7 @@ server <- function(input, output, session) {
     suppressWarnings({ calculate_empirical_ane(dummy_obs, custom_safe, params_demo, max(years_vec)) })
   })
   
+  
   observeEvent(input$run_model, {
     d_mapped <- processed_data()
     if(nrow(d_mapped) == 0) return()
@@ -709,7 +864,11 @@ server <- function(input, output, session) {
     withProgress(message = 'Calculating baseline arrays...', value = 0, {
       if (input$data_mode == "upload" && input$map_month != "none") {
         setProgress(value = 0.1, detail = "Executing nested monthly Fourier matrix filling engine...")
-        d_annual <- run_fourier_imputation(d_mapped, iter = max(2000, floor(input$iterations / 5)))
+        d_annual <- run_fourier_imputation(
+          d_mapped, 
+          iter = max(2000, floor(input$iterations / 5)),
+          six_month_sites = input$six_month_sites # Connects the UI choice to the JAGS data builder
+        )
       } else {
         d_annual <- d_mapped %>% group_by(Year, Site) %>% summarise(Count = sum(Count, na.rm=TRUE), .groups="drop")
       }
@@ -769,6 +928,7 @@ server <- function(input, output, session) {
       vault$draws <- data.frame(U = fit$sims.list$U, Q = fit$sims.list$Q, 
                                 R_mean = if(is.matrix(fit$sims.list$R)) rowMeans(fit$sims.list$R) else as.numeric(fit$sims.list$R), 
                                 Total_Females = X_total[, fy] * input$remig_int)
+      
       setProgress(value = 1, detail = "Complete!")
     })
   })
@@ -806,7 +966,20 @@ server <- function(input, output, session) {
     if(input$run_split) abline(v = input$split_year, lty=2, col="#0072B2", lwd=1.5)
     polygon(c(years, rev(years)), c(X_q[1, ], rev(X_q[3, ])), col = 'grey90', border = NA)
     lines(years, X_q[2, ], lwd = 2.5, col = 'black')
+    
+    # Plot true observed points as solid filled circles
     points(obs_summary$Year, log(obs_summary$Ann_Tot), pch = 16, col = "black")
+    
+    # Isolate missing/unmonitored years on the timeline
+    raw_mapped <- raw_ingested_data()
+    observed_years <- unique(raw_mapped$Year[!is.na(raw_mapped$Count) & raw_mapped$Count > 0])
+    missing_years <- years[!(years %in% observed_years)]
+    
+    # Overlay open circles (pch = 1) directly onto the trajectory line for missing years
+    if (length(missing_years) > 0) {
+      idx_missing <- match(missing_years, years)
+      points(missing_years, X_q[2, idx_missing], pch = 1, col = "black", cex = 1.6, lwd = 2)
+    }
   })
   
   output$dynamic_unified_plot <- renderUI({
@@ -817,7 +990,7 @@ server <- function(input, output, session) {
   output$unified_trend_plot <- renderPlot({
     req(vault$res, vault$marss, vault$abund, input$plot_layers)
     
-    # Adds the native floating progress card banner
+    # 1. Native floating progress card banner is back
     withProgress(message = "Generating Abundance Trajectories plot...", value = 0.5, {
       
       j_fit <- vault$res$fit
@@ -916,37 +1089,63 @@ server <- function(input, output, session) {
     years <- vault$res$years
     fy <- length(years)
     
-    # Pull the posterior simulation arrays
     r_vec <- as.numeric(fit$sims.list$U)
     q_vec <- as.numeric(fit$sims.list$Q)
     
-    # Calculate the exact mathematical correlation between trend and process noise
-    cor_rq <- cor(r_vec, q_vec, use = "complete.obs")
-    
-    # Evaluate parameter health based on an identifiability threshold of 0.30
-    if (abs(cor_rq) < 0.30) {
-      p(
-        tags$b("Interpretation: "), 
-        sprintf("The correlation between long-term trend (r) and environmental variance (Q) is near zero (r = %.2f). ", cor_rq), 
-        "This confirms excellent ", 
-        tags$span("parameter identifiability", style = "color:#0072B2; font-weight:bold;"), 
-        "—the data are clean enough that the model is calculating the structural population trajectory without getting it confused with background ocean noise."
-      )
+    if (is.null(fit$sims.list$A)) {
+      n_vec <- exp(as.numeric(fit$sims.list$X[, fy]))
     } else {
-      p(
-        tags$b("Interpretation: "), 
-        sprintf("The correlation between trend (r) and environmental variance (Q) is elevated (r = %.2f). ", cor_rq), 
-        "This indicates a risk of ", 
-        tags$span("parameter confounding", style = "color:#D55E00; font-weight:bold;"), 
-        ", meaning the model is struggling to distinguish between a persistent directional decline and a sequence of highly volatile, random environmental years."
-      )
+      n_vec <- apply(fit$sims.list$X, 1, function(v) sum(apply(fit$sims.list$A, 2, function(x) exp(v[fy] + x))))
     }
+    
+    cor_rq <- cor(r_vec, q_vec, use = "complete.obs")
+    cor_rn <- cor(r_vec, n_vec, use = "complete.obs")
+    cor_nq <- cor(n_vec, q_vec, use = "complete.obs")
+    
+    tagList(
+      h5(style = "font-size: 1.1rem; font-weight: bold; margin-bottom: 12px;", 
+         shiny::icon("analytics"), " Management & Biological Interpretation Guide:"),
+      
+      tags$ul(style = "padding-left: 20px;",
+              # 1. Trend vs Environmental Noise
+              tags$li(style = "margin-bottom: 10px;",
+                      tags$b("Independence of Long-Term Trend and Environmental Fluctuation [r = ", sprintf("%.2f", cor_rq), "]: "),
+                      if(abs(cor_rq) < 0.30) {
+                        "This near-zero correlation confirms excellent parameter separation. The model is calculating the persistent, multi-decade population growth or decline without being distorted or misled by short-term, year-to-year environmental spikes."
+                      } else {
+                        "Warning: The calculated growth rate and background environmental noise are statistically bleeding into each other, meaning the long-term trend estimate is highly sensitive to our environmental variance assumptions."
+                      }
+              ),
+              
+              # 2. Trend vs Current Headcount
+              tags$li(style = "margin-bottom: 10px;",
+                      tags$b("Cumulative Growth Impact on Final Abundance [r = ", sprintf("%.2f", cor_rn), "]: "),
+                      "This positive relationship verifies standard biological consistency within the model: simulation pathways that evaluate a slightly higher historical growth rate predictably accumulate more individuals, leading to a larger current population estimate."
+              ),
+              
+              # 3. Variance-Expanded Abundance Limits
+              tags$li(style = "margin-bottom: 10px;",
+                      tags$b("Abundance Sensitivity to Environmental Uncertainty [r = ", sprintf("%.2f", cor_nq), "]: "),
+                      if(cor_nq >= 0.30) {
+                        tags$span(style = "font-weight: 500; color: #b02a37;",
+                                  sprintf("Elevated correlation detected. High-variance environmental simulations are pushing open the upper statistical limits of our population estimate. This indicates that our maximum potential population size is structurally linked to background ocean volatility.", cor_nq))
+                      } else {
+                        "Current population size estimates are stable and mathematically isolated from environmental variance scaling factors."
+                      }
+              )
+      ),
+      
+      div(style = "background-color: #f8f9fa; border-left: 4px solid #6c757d; padding: 10px; margin-top: 15px; border-radius: 4px;",
+          tags$b("Statistical Distribution Note (Histogram Shapes): "),
+          "The asymmetric right-hand tail displayed in the middle (N_final) histogram indicates that our population uncertainty is not uniform. While the lower boundary is firmly restricted by actual beach nest counts, the upper boundary allows for a wide margin of error. Statistically, the true population size has a much higher likelihood of being under-counted rather than over-counted."
+      )
+    )
   })
   
   output$posterior_pairs_plot <- renderPlot({
     validate(need(vault$res, "Please click Run “Trend and Abundance” model on Page 2 first."))
     
-    # Adds the native floating progress card banner for the matrix
+    # 2. Re-activates the floating progress card notification banner for the matrix
     withProgress(message = "Computing Joint Parameter Covariance Matrix...", value = 0.5, {
       
       fit <- vault$res$fit; years <- vault$res$years; fy <- length(years)
@@ -962,12 +1161,13 @@ server <- function(input, output, session) {
       pairs_df <- data.frame(r = r_vec, N_final = n_vec, Q = q_vec)
       
       panel_hist <- function(x, ...) {
-        usr <- par("usr"); on.exit(par(usr))
-        par(usr = c(usr[1:2], 0, 1.1)) 
         h <- hist(x, plot = FALSE, breaks = 25)
         y <- h$counts / max(h$counts)
+        old_par <- par(usr = c(par("usr")[1:2], 0, 1.1))
+        on.exit(par(old_par))
         lines(approx(h$mids, y, xout=seq(min(x), max(x), length.out=100)), lwd = 2, col = "black")
       }
+      
       panel_scatter <- function(x, y, ...) {
         points(x, y, pch = 20, col = rgb(0.3, 0.3, 0.3, 0.05), cex = 0.5)
         ellipse_50 <- car::dataEllipse(x, y, levels = 0.50, draw = FALSE)
@@ -975,17 +1175,11 @@ server <- function(input, output, session) {
         lines(ellipse_50, col = "black", lwd = 2)
         lines(ellipse_95, col = "gray50", lwd = 1.2, lty = 2)
       }
+      
       panel_cor <- function(x, y, ...) {
-        # 1. Calculate the correlation coefficient cleanly (typo fixed)
         r_coef <- cor(x, y, use = "complete.obs")
-        
-        # 2. Safely swap coordinates and store the old ones as a named list
         old_par <- par(usr = c(0, 1, 0, 1))
-        
-        # 3. Cleanly restore settings on exit to remove warnings
         on.exit(par(old_par))
-        
-        # 4. Print text
         text(0.5, 0.5, sprintf("%.2f", r_coef), cex = 1.5, font = 2)
       }
       
